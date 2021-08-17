@@ -1,0 +1,127 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - citest
+
+jobs:
+  # tests:
+  #   runs-on: ubuntu-latest
+  #   container:
+  #     image: ghcr.io/flutter-tizen/ft-engine-build:latest
+  #     credentials:
+  #       username: ${{ github.repository_owner }}
+  #       password: ${{ secrets.TIZENAPI_GHCR_TOKEN }}
+  #   steps:
+  #   - uses: actions/checkout@v2
+  #     with:
+  #       path: src/flutter
+  #   - name: gclient sync
+  #     run: |
+  #       gclient config --name="src/flutter" --deps-file="DEPS" --unmanaged https://github.com/flutter-tizen/engine.git
+  #       gclient sync -v -f -D
+  #   - name: Check Formatting
+  #     working-directory: ./src
+  #     run: flutter/ci/format.sh
+  #   - name: Unit Tests
+  #     working-directory: ./src
+  #     run: |
+  #       flutter/tools/gn \
+  #       --no-goma \
+  #       --runtime-mode debug \
+  #       --enable-fontconfig \
+  #       --build-tizen-shell
+  #       ninja -C out/host_debug
+  #       out/host_debug/flutter_tizen_unittests
+  
+
+
+  build:
+    # runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flutter-tizen/ft-engine-build:latest
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.TIZENAPI_GHCR_TOKEN }}
+
+    strategy:
+      matrix:
+        arch: [arm]
+        mode: [release, profile]
+        include:
+          - arch: arm
+            triple: armv7l-tizen-linux-gnueabi
+
+    # strategy:
+    #   matrix:
+    #     arch: [arm, arm64, x86]
+    #     mode: [debug, release, profile]
+    #     include:
+    #       - arch: arm
+    #         triple: armv7l-tizen-linux-gnueabi
+    #       - arch: arm64
+    #         triple: aarch64-tizen-linux-gnu
+    #       - arch: x86
+    #         triple: i586-tizen-linux-gnueabi
+    #     exclude:
+    #       - arch: x86
+    #         mode: release
+    #       - arch: x86
+    #         mode: profile
+
+    env:
+      CHECKSUM_LOG: out/linux_${{ matrix.mode }}_${{ matrix.arch }}/.checksum.log
+      CACHE_DEPS: flutter third_party buildtools
+
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        path: src/flutter
+
+    - uses: actions/cache@v2
+      with:
+        path: src/out/linux_${{ matrix.mode }}_${{ matrix.arch }}
+        key: out-build-linux_${{ matrix.mode }}_${{ matrix.arch }}-${{ github.sha }}
+        restore-keys: |
+          out-build-linux_${{ matrix.mode }}_${{ matrix.arch }}-
+
+    - name: gclient sync
+      run: |
+        gclient config --name="src/flutter" --deps-file="DEPS" --unmanaged https://github.com/flutter-tizen/engine.git
+        gclient sync -v -f -D --no-history --shallow
+        sed -i 's/"-Wno-non-c-typedef-for-linkage",//g' src/build/config/compiler/BUILD.gn
+        sed -i 's/"-Wno-psabi",//g' src/build/config/compiler/BUILD.gn
+
+    - name: prepare incremental build
+      working-directory: ./src
+      run: |
+        if [ -f $CHECKSUM_LOG ]; then
+          for x in $(find $CACHE_DEPS -type d -not -path "*/.git*"); do
+            touch -c -m -d @1600000000 $x/*
+          done
+          for f in $(sha1sum -c --quiet $CHECKSUM_LOG 2>/dev/null | grep FAILED | cut -d: -f1); do
+            [ -f $f ] && (echo "touch $f" && touch $f) || true
+          done
+        fi
+
+    - name: build
+      working-directory: ./src
+      run: |
+        flutter/tools/gn \
+          --target-os linux \
+          --linux-cpu ${{ matrix.arch }} \
+          --no-goma \
+          --target-toolchain /tizen_tools/toolchains \
+          --target-sysroot /tizen_tools/sysroot/${{ matrix.arch }} \
+          --target-triple ${{ matrix.triple }} \
+          --runtime-mode ${{ matrix.mode }} \
+          --enable-fontconfig \
+          --embedder-for-target \
+          --disable-desktop-embeddings \
+          --build-tizen-shell
+        ninja -C out/linux_${{ matrix.mode }}_${{ matrix.arch }}
+        find $CACHE_DEPS -type f -not -path "*/.git*" -print0 | xargs -r0 sha1sum > $CHECKSUM_LOG
+
+
